@@ -23,8 +23,8 @@ A [Claude Code](https://claude.ai/code) plugin that brings conversation manageme
 ## Install
 
 ```
-/plugin marketplace add urav/claudestrophobic
-/plugin install claudestrophobic
+/plugin marketplace add urav06/claudestrophobic
+/plugin install claudestrophobic@claudestrophobic-marketplace
 ```
 
 ## Usage

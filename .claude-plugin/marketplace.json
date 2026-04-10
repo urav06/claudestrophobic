@@ -1,0 +1,13 @@
+{
+  "name": "claudestrophobic-marketplace",
+  "owner": {
+    "name": "urav"
+  },
+  "plugins": [
+    {
+      "name": "claudestrophobic",
+      "source": "./",
+      "description": "Session management for Claude Code - list, delete, and prune conversations"
+    }
+  ]
+}
