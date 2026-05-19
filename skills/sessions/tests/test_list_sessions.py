@@ -312,5 +312,99 @@ class PrunePerformanceTests(unittest.TestCase):
             )
 
 
+class SafetyTests(unittest.TestCase):
+    """Defensive properties: atomic history rewrite + tight path guard in _remove."""
+
+    def setUp(self):
+        import os
+        self._os = os
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+        self.claude_dir = Path(self.tmp.name) / ".claude"
+        self.claude_dir.mkdir()
+        (self.claude_dir / "projects").mkdir()
+
+        self.project = "/imaginary/project/path"
+        encoded = "-imaginary-project-path"
+        self.project_root = self.claude_dir / "projects" / encoded
+        self.project_root.mkdir()
+
+        self._claude_patch = patch.object(
+            list_sessions, "CLAUDE_DIR", self.claude_dir,
+        )
+        self._claude_patch.start()
+        self.addCleanup(self._claude_patch.stop)
+
+        # Force the shutil fallback in _remove(); no real Trash interaction.
+        self._sp_patch = patch.object(
+            subprocess, "run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=1),
+        )
+        self._sp_patch.start()
+        self.addCleanup(self._sp_patch.stop)
+
+    # ------------------------------------------------------------------
+    # Atomic history.jsonl rewrite.
+    # ------------------------------------------------------------------
+
+    def test_history_rewrite_uses_os_replace(self):
+        """Rewriting history.jsonl must go through os.replace, not direct write."""
+        uuid = "abc12345-1111-2222-3333-444444444444"
+        _write_session(self.project_root, uuid)
+
+        history = self.claude_dir / "history.jsonl"
+        history.write_text(json.dumps({
+            "project": self.project, "sessionId": uuid, "display": "x",
+        }) + "\n")
+
+        with patch.object(self._os, "replace", wraps=self._os.replace) as spy:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                list_sessions.delete(uuid, self.project)
+            self.assertEqual(
+                spy.call_count, 1,
+                "history rewrite must call os.replace exactly once",
+            )
+
+    def test_history_rewrite_leaves_no_tmp_file(self):
+        """The .tmp file used during atomic rewrite must be renamed away."""
+        uuid = "abc12345-1111-2222-3333-444444444444"
+        _write_session(self.project_root, uuid)
+
+        history = self.claude_dir / "history.jsonl"
+        history.write_text(json.dumps({
+            "project": self.project, "sessionId": uuid, "display": "x",
+        }) + "\n")
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            list_sessions.delete(uuid, self.project)
+
+        tmp = history.parent / (history.name + ".tmp")
+        self.assertFalse(tmp.exists(), "history.jsonl.tmp must not survive the rewrite")
+        self.assertTrue(history.exists(), "history.jsonl must exist after the rewrite")
+
+    def test_history_rewrite_actually_filters(self):
+        """End-to-end: the deleted UUID's history line is gone after delete."""
+        kept_uuid    = "00000000-0000-0000-0000-000000000001"
+        deleted_uuid = "00000000-0000-0000-0000-000000000002"
+        _write_session(self.project_root, deleted_uuid)
+
+        history = self.claude_dir / "history.jsonl"
+        history.write_text("\n".join([
+            json.dumps({"project": self.project, "sessionId": kept_uuid,    "display": "keep"}),
+            json.dumps({"project": self.project, "sessionId": deleted_uuid, "display": "drop"}),
+        ]) + "\n")
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            list_sessions.delete(deleted_uuid, self.project)
+
+        remaining = history.read_text()
+        self.assertIn(kept_uuid,    remaining)
+        self.assertNotIn(deleted_uuid, remaining)
+
 if __name__ == "__main__":
     unittest.main()

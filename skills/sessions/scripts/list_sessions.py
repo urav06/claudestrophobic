@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import shutil
@@ -184,12 +185,19 @@ def discover(project: str) -> list[Session]:
 
 
 def _rewrite_history(uuids_to_remove: set[str]) -> None:
-    """Drop history.jsonl lines whose sessionId is in `uuids_to_remove`."""
+    """Drop history.jsonl lines whose sessionId is in `uuids_to_remove`.
+
+    Writes to a sibling .tmp path and atomically renames onto the target
+    so a concurrent writer (another Claude Code session appending to
+    history) cannot see a half-written file.
+    """
     history = CLAUDE_DIR / "history.jsonl"
     if not history.exists() or not uuids_to_remove: return
     lines = history.read_text().splitlines()
     keep  = [line for line in lines if line.strip() and json.loads(line).get("sessionId") not in uuids_to_remove]
-    history.write_text("\n".join(keep) + "\n")
+    tmp   = history.parent / (history.name + ".tmp")
+    tmp.write_text("\n".join(keep) + "\n")
+    os.replace(tmp, history)
 
 
 def _delete_session(session: Session, project: str, rewrite_history: bool = True) -> bool:
