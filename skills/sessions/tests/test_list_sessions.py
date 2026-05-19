@@ -107,6 +107,124 @@ class SelectorResolutionTests(unittest.TestCase):
             "delete() with UUID prefix should remove the session",
         )
 
+    # ------------------------------------------------------------------
+    # Baseline: full-UUID match still works (regression guard).
+    # ------------------------------------------------------------------
+
+    def test_delete_by_full_uuid(self):
+        full = "abc12345-1111-2222-3333-444444444444"
+        jsonl = _write_session(self.project_root, full)
+        self._delete(full)
+        self.assertFalse(jsonl.exists())
+
+    # ------------------------------------------------------------------
+    # Name matching.
+    # ------------------------------------------------------------------
+
+    def test_delete_by_name_substring(self):
+        """README example: '/sessions delete fix auth middleware'."""
+        uuid = "11111111-aaaa-bbbb-cccc-000000000001"
+        jsonl = _write_session(
+            self.project_root, uuid, custom_title="Fix auth middleware",
+        )
+        self._delete("fix auth")
+        self.assertFalse(jsonl.exists())
+
+    def test_delete_by_name_tokens_out_of_order(self):
+        """All tokens must match, but order is irrelevant."""
+        uuid = "11111111-aaaa-bbbb-cccc-000000000002"
+        jsonl = _write_session(
+            self.project_root, uuid, custom_title="Authentication middleware fix",
+        )
+        self._delete("fix auth")
+        self.assertFalse(jsonl.exists())
+
+    def test_name_match_case_insensitive(self):
+        uuid = "11111111-aaaa-bbbb-cccc-000000000003"
+        jsonl = _write_session(
+            self.project_root, uuid, custom_title="Authenticate User",
+        )
+        self._delete("AUTH")
+        self.assertFalse(jsonl.exists())
+
+    # ------------------------------------------------------------------
+    # Ambiguity: refuse, don't pick.
+    # ------------------------------------------------------------------
+
+    def test_ambiguous_prefix_refuses(self):
+        a = _write_session(
+            self.project_root, "42f15ca9-aaaa-1111-2222-333333333333",
+        )
+        b = _write_session(
+            self.project_root, "42f15ca9-bbbb-4444-5555-666666666666",
+        )
+        out = self._delete("42f15ca9")
+        self.assertTrue(a.exists(), "ambiguous prefix must not delete")
+        self.assertTrue(b.exists(), "ambiguous prefix must not delete")
+        self.assertIn("Ambiguous", out)
+
+    def test_ambiguous_name_refuses(self):
+        a = _write_session(
+            self.project_root,
+            "aaaaaaaa-1111-1111-1111-111111111111",
+            custom_title="Fix auth bug",
+        )
+        b = _write_session(
+            self.project_root,
+            "bbbbbbbb-2222-2222-2222-222222222222",
+            custom_title="Investigate auth",
+        )
+        out = self._delete("auth")
+        self.assertTrue(a.exists(), "ambiguous name must not delete")
+        self.assertTrue(b.exists(), "ambiguous name must not delete")
+        self.assertIn("Ambiguous", out)
+
+    # ------------------------------------------------------------------
+    # Safety: active sessions, no-match.
+    # ------------------------------------------------------------------
+
+    def test_active_session_protected_via_prefix(self):
+        """Active-session protection survives prefix resolution."""
+        full = "deadbeef-1111-2222-3333-444444444444"
+        jsonl = _write_session(self.project_root, full)
+
+        sessions_dir = self.claude_dir / "sessions"
+        sessions_dir.mkdir()
+        (sessions_dir / "lock.json").write_text(
+            json.dumps({"sessionId": full}),
+        )
+
+        out = self._delete("deadbeef")
+        self.assertTrue(jsonl.exists())
+        self.assertIn("currently active", out)
+
+    def test_no_match(self):
+        _write_session(
+            self.project_root, "abc12345-1111-2222-3333-444444444444",
+        )
+        out = self._delete("xyzzy")
+        self.assertIn("No session found", out)
+
+    # ------------------------------------------------------------------
+    # Priority: UUID-prefix wins over name substring.
+    # ------------------------------------------------------------------
+
+    def test_uuid_prefix_priority_over_name(self):
+        """If selector is a valid UUID prefix, name match does not fire."""
+        # Session 1: UUID starts with "abc"
+        uuid_with_prefix = "abcdef00-1111-2222-3333-444444444444"
+        j1 = _write_session(self.project_root, uuid_with_prefix)
+        # Session 2: name contains "abc", UUID does not
+        uuid_with_name = "00000000-1111-2222-3333-555555555555"
+        j2 = _write_session(
+            self.project_root, uuid_with_name, custom_title="abc title",
+        )
+
+        self._delete("abc")
+
+        self.assertFalse(j1.exists(), "UUID-prefix match should win priority")
+        self.assertTrue(j2.exists(), "name match must not fire when UUID prefix matches")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -112,6 +112,53 @@ class Session:
 
 
 # ---------------------------------------------------------------------------
+#  Selector resolution
+# ---------------------------------------------------------------------------
+
+def _resolve(selector: str, sessions: list[Session]) -> tuple[Session | None, list[Session]]:
+    """Resolve a selector to a single Session.
+
+    Priority chain:
+      1. Exact full-UUID match.
+      2. UUID prefix match (`startswith`).
+      3. Name match: case-insensitive token-AND substring — every
+         whitespace-separated token of the selector must appear as a
+         substring of the session name (case-folded).
+
+    Returns (match, candidates):
+      - (session, [session])   exactly one match
+      - (None, [s1, s2, ...])  ambiguous, multiple candidates
+      - (None, [])             no match
+    """
+    selector = selector.strip()
+    if not selector:
+        return None, []
+
+    for s in sessions:
+        if s.uuid == selector:
+            return s, [s]
+
+    prefix_hits = [s for s in sessions if s.uuid.startswith(selector)]
+    if len(prefix_hits) == 1:
+        return prefix_hits[0], prefix_hits
+    if len(prefix_hits) > 1:
+        return None, prefix_hits
+
+    tokens = selector.lower().split()
+    if tokens:
+        name_hits = [
+            s for s in sessions
+            if all(t in s.name.lower() for t in tokens)
+        ]
+        if len(name_hits) == 1:
+            return name_hits[0], name_hits
+        if len(name_hits) > 1:
+            return None, name_hits
+
+    return None, []
+
+
+# ---------------------------------------------------------------------------
 #  Operations
 # ---------------------------------------------------------------------------
 
@@ -136,7 +183,25 @@ def discover(project: str) -> list[Session]:
     return sorted(sessions, key=lambda s: s.mtime, reverse=True)
 
 
-def delete(uuid: str, project: str) -> None:
+def delete(selector: str, project: str) -> None:
+    sessions = discover(project)
+    match, candidates = _resolve(selector, sessions)
+
+    if match is None and not candidates:
+        print(f"No session found: {selector}")
+        return
+
+    if match is None:
+        print(f"Ambiguous selector '{selector}' matches {len(candidates)} sessions:\n")
+        print("| # | Name | UUID | Date |")
+        print("|---|------|------|------|")
+        for i, s in enumerate(candidates, 1):
+            print(f"| {i} | {s.name} | `{s.uuid[:8]}` | {s.date} |")
+        print("\nRefusing to delete. Use a more specific selector.")
+        return
+
+    uuid = match.uuid
+
     if uuid in _active_session_ids():
         print(f"ERROR: Session {uuid[:8]} is currently active")
         return
