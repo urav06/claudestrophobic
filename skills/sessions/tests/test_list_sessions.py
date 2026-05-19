@@ -226,5 +226,91 @@ class SelectorResolutionTests(unittest.TestCase):
         self.assertTrue(j2.exists(), "name match must not fire when UUID prefix matches")
 
 
+class PrunePerformanceTests(unittest.TestCase):
+    """Guard against O(N²) regressions in prune().
+
+    prune() must call discover() exactly once and rewrite history.jsonl
+    exactly once, regardless of how many sessions are pruned. Calling
+    delete() per iteration (which itself calls discover() and rewrites
+    history) would explode both costs.
+    """
+
+    def setUp(self):
+        import os
+        import time
+        self._os = os
+        self._time = time
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+        self.claude_dir = Path(self.tmp.name) / ".claude"
+        self.claude_dir.mkdir()
+        (self.claude_dir / "projects").mkdir()
+
+        self.project = "/imaginary/project/path"
+        encoded = "-imaginary-project-path"
+        self.project_root = self.claude_dir / "projects" / encoded
+        self.project_root.mkdir()
+
+        self._claude_patch = patch.object(
+            list_sessions, "CLAUDE_DIR", self.claude_dir,
+        )
+        self._claude_patch.start()
+        self.addCleanup(self._claude_patch.stop)
+
+        # Force the shutil fallback in _remove(); no real Trash interaction.
+        self._sp_patch = patch.object(
+            subprocess, "run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=1),
+        )
+        self._sp_patch.start()
+        self.addCleanup(self._sp_patch.stop)
+
+        # Three sessions, all 30 days old (well past any prune threshold).
+        old_time = self._time.time() - 30 * 86400
+        self.uuids = [
+            "aaaaaaaa-1111-1111-1111-111111111111",
+            "bbbbbbbb-2222-2222-2222-222222222222",
+            "cccccccc-3333-3333-3333-333333333333",
+        ]
+        for u in self.uuids:
+            j = _write_session(self.project_root, u)
+            self._os.utime(j, (old_time, old_time))
+
+        # Pre-populate history so the rewrite path actually runs.
+        history = self.claude_dir / "history.jsonl"
+        history.write_text("\n".join(
+            json.dumps({"project": self.project, "sessionId": u, "display": "x"})
+            for u in self.uuids
+        ) + "\n")
+
+    def _prune(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            list_sessions.prune(self.project, "1d", confirm=True)
+
+    def test_prune_calls_discover_only_once(self):
+        with patch.object(
+            list_sessions, "discover", wraps=list_sessions.discover,
+        ) as spy:
+            self._prune()
+            self.assertEqual(
+                spy.call_count, 1,
+                "prune() must call discover() exactly once, not per session",
+            )
+
+    def test_prune_rewrites_history_only_once(self):
+        with patch.object(
+            list_sessions, "_rewrite_history",
+            wraps=list_sessions._rewrite_history,
+        ) as spy:
+            self._prune()
+            self.assertEqual(
+                spy.call_count, 1,
+                "prune() must batch history rewrite into one call",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

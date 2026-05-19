@@ -183,6 +183,47 @@ def discover(project: str) -> list[Session]:
     return sorted(sessions, key=lambda s: s.mtime, reverse=True)
 
 
+def _rewrite_history(uuids_to_remove: set[str]) -> None:
+    """Drop history.jsonl lines whose sessionId is in `uuids_to_remove`."""
+    history = CLAUDE_DIR / "history.jsonl"
+    if not history.exists() or not uuids_to_remove: return
+    lines = history.read_text().splitlines()
+    keep  = [line for line in lines if line.strip() and json.loads(line).get("sessionId") not in uuids_to_remove]
+    history.write_text("\n".join(keep) + "\n")
+
+
+def _delete_session(session: Session, project: str, rewrite_history: bool = True) -> bool:
+    """Delete one resolved session's files. Returns True on success.
+
+    When called from `prune`, set `rewrite_history=False` and have the caller
+    invoke `_rewrite_history` once with the full set of deleted UUIDs — that
+    keeps prune at O(N) instead of O(N²) on history rewrites.
+    """
+    uuid = session.uuid
+
+    if uuid in _active_session_ids():
+        print(f"ERROR: Session {uuid[:8]} is currently active")
+        return False
+
+    root    = project_dir(project)
+    targets = [p for p in [
+        root / f"{uuid}.jsonl" if root else None,
+        root / uuid if root else None,
+        CLAUDE_DIR / "file-history" / uuid,
+        CLAUDE_DIR / "session-env"  / uuid,
+    ] if p and p.exists()]
+
+    if not targets:
+        print(f"No session found: {uuid}")
+        return False
+
+    for path in targets: _remove(path)
+    if rewrite_history: _rewrite_history({uuid})
+
+    print(f"Deleted: {uuid[:8]} ({len(targets)} items)")
+    return True
+
+
 def delete(selector: str, project: str) -> None:
     sessions = discover(project)
     match, candidates = _resolve(selector, sessions)
@@ -200,33 +241,7 @@ def delete(selector: str, project: str) -> None:
         print("\nRefusing to delete. Use a more specific selector.")
         return
 
-    uuid = match.uuid
-
-    if uuid in _active_session_ids():
-        print(f"ERROR: Session {uuid[:8]} is currently active")
-        return
-
-    root    = project_dir(project)
-    targets = [p for p in [
-        root / f"{uuid}.jsonl" if root else None,
-        root / uuid if root else None,
-        CLAUDE_DIR / "file-history" / uuid,
-        CLAUDE_DIR / "session-env"  / uuid,
-    ] if p and p.exists()]
-
-    if not targets:
-        print(f"No session found: {uuid}")
-        return
-
-    for path in targets: _remove(path)
-
-    history = CLAUDE_DIR / "history.jsonl"
-    if history.exists():
-        lines = history.read_text().splitlines()
-        keep  = [line for line in lines if line.strip() and json.loads(line).get("sessionId") != uuid]
-        history.write_text("\n".join(keep) + "\n")
-
-    print(f"Deleted: {uuid[:8]} ({len(targets)} items)")
+    _delete_session(match, project)
 
 
 def prune(project: str, max_age: str, confirm: bool = False) -> None:
@@ -249,8 +264,12 @@ def prune(project: str, max_age: str, confirm: bool = False) -> None:
         print(f"\n**{len(old)} sessions** ready to prune.")
         return
 
-    for s in old: delete(s.uuid, project)
-    print(f"\nPruned {len(old)} sessions.")
+    deleted = set()
+    for s in old:
+        if _delete_session(s, project, rewrite_history=False):
+            deleted.add(s.uuid)
+    _rewrite_history(deleted)
+    print(f"\nPruned {len(deleted)} sessions.")
 
 
 # ---------------------------------------------------------------------------
