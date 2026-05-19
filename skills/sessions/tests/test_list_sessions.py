@@ -406,5 +406,39 @@ class SafetyTests(unittest.TestCase):
         self.assertIn(kept_uuid,    remaining)
         self.assertNotIn(deleted_uuid, remaining)
 
+    # ------------------------------------------------------------------
+    # _remove() path guard.
+    # ------------------------------------------------------------------
+
+    def test_remove_refuses_sibling_dir_with_prefix(self):
+        """`~/.claude-evil/x` shares a string prefix with `~/.claude` but
+        is NOT inside it. The guard must reject it. Without the os.sep
+        fix, this slips through because startswith() is prefix-string,
+        not path-containment."""
+        evil_dir = self.claude_dir.parent / (self.claude_dir.name + "-evil")
+        evil_dir.mkdir()
+        evil_file = evil_dir / "target.jsonl"
+        evil_file.write_text("data")
+
+        list_sessions._remove(evil_file)
+
+        self.assertTrue(
+            evil_file.exists(),
+            "_remove() must refuse paths in sibling dirs that share a string prefix",
+        )
+
+    def test_remove_accepts_legitimate_claude_path(self):
+        """Regression guard: the path-guard fix must not refuse legitimate
+        paths inside ~/.claude/."""
+        legit_file = self.project_root / "legit.jsonl"
+        legit_file.write_text("data")
+
+        list_sessions._remove(legit_file)
+
+        self.assertFalse(
+            legit_file.exists(),
+            "_remove() must still delete legitimate paths under CLAUDE_DIR",
+        )
+
 if __name__ == "__main__":
     unittest.main()

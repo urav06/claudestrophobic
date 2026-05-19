@@ -165,7 +165,8 @@ def _resolve(selector: str, sessions: list[Session]) -> tuple[Session | None, li
 
 def _remove(path: Path) -> None:
     """Trash where available, rm as fallback. Refuses paths outside ~/.claude/"""
-    if not str(path.resolve()).startswith(str(CLAUDE_DIR.resolve())): return
+    claude_root = str(CLAUDE_DIR.resolve()) + os.sep
+    if not str(path.resolve()).startswith(claude_root): return
 
     trash_cmd = {
         "Darwin": ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{path}"'],
