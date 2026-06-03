@@ -7,7 +7,7 @@
     {
       "name": "claudestrophobic",
       "source": "./",
-      "description": "Session management for Claude Code - list, delete, and prune conversations"
+      "description": "Chat & project management for Claude Code - list, delete, prune, and nuke conversations"
     }
   ]
 }

@@ -18,7 +18,7 @@
 
 ---
 
-A [Claude Code](https://claude.ai/code) plugin that brings conversation management back — list, delete, and prune sessions without leaving the terminal. Built as a skill, not an MCP tool, so it occupies **zero tokens** in your context window until you invoke it.
+A [Claude Code](https://claude.ai/code) plugin that brings conversation management back — list, delete, and prune chats, and clean up whole projects, without leaving the terminal. Built as skills, not MCP tools, so they occupy **zero tokens** in your context window until you invoke them.
 
 ## Install
 
@@ -29,12 +29,22 @@ A [Claude Code](https://claude.ai/code) plugin that brings conversation manageme
 
 ## Usage
 
+**`/sessions`** — chats in the project you're in:
+
 ```
-/sessions                              # list all sessions
-/sessions delete fix auth middleware   # delete by name (fuzzy match)
-/sessions delete 064ddd26             # delete by partial UUID
-/sessions prune --older 2w            # delete sessions older than 2 weeks
-/sessions browse                      # open project's .claude directory
+/sessions                              # list this project's chats
+/sessions delete the one about auth    # delete by description (resolved to a chat)
+/sessions delete 064ddd26              # …or by UUID prefix
+/sessions prune --older 2w             # delete chats older than 2 weeks
+/sessions browse                       # open this project's folder
+```
+
+**`/projects`** — the whole map, managed from outside:
+
+```
+/projects                              # list every project: chats, size, live / orphaned
+/projects nuke them-ctf                # preview removing a project you're done with
+/projects nuke them-ctf --confirm      # …then nuke it: chats, memory, history, dir → Trash
 ```
 
 ## Why
@@ -45,7 +55,9 @@ This brings that visibility back.
 
 ## How it works
 
-- **Names** resolved from session transcript metadata — `/rename` titles, auto-generated titles, or first message. Same priority chain Claude Code uses internally.
-- **Deletion** informed by Claude Code's recently surfaced internals — cleans transcripts, subagent data, file history, and session environment. Nothing left dangling.
-- **Safety** — active sessions detected from lock files and protected from deletion. System Trash where available, `rm` as fallback. Cross-platform.
-- **Overhead** — only loads into context when you type `/sessions`. Zero tokens otherwise.
+- **Names** resolved from chat transcript metadata — `/rename` titles, auto-generated titles, or first message. Same priority chain Claude Code uses internally.
+- **Deletion** informed by Claude Code's surfaced internals — cleans transcripts, subagent data, file history, session environment, and history rows. Nothing left dangling.
+- **Projects** discovered by their *real* working directory, read losslessly from the transcript (not the lossy encoded folder name) — so chats orphaned by a deleted folder are detected and reclaimable. Claude Code never cleans these up on its own.
+- **`nuke`** is total and deliberate: it takes a finished project's chats, memory, history, and directory in one go. It refuses the project you're currently in and any project with an active chat.
+- **Safety** — active chats detected from lock files and protected. History rewrites are atomic (a concurrent session never sees a half-written file). Everything goes to the system Trash where available, `rm` as fallback. Cross-platform.
+- **Overhead** — only loads into context when you invoke a skill. Zero tokens otherwise.

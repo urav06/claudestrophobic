@@ -1,8 +1,8 @@
 {
   "name":        "claudestrophobic",
-  "version":     "0.1.0",
-  "description": "Session management for Claude Code — list, identify, and delete conversations from within a chat",
+  "version":     "0.2.0",
+  "description": "Manage Claude Code chats and projects — list, delete, prune, and nuke conversations from a chat",
   "author":      { "name": "urav" },
   "license":     "MIT",
-  "keywords":    ["sessions", "management", "cleanup", "conversations"]
+  "keywords":    ["sessions", "projects", "management", "cleanup", "conversations"]
 }

@@ -1,22 +1,25 @@
 ---
 name: sessions
-description: List and manage Claude Code sessions for this project
-argument-hint: "[list | delete <name> | browse | prune --older <duration>]"
+description: List and manage chats (sessions) in the current project
+argument-hint: "[list | delete <name|uuid> | prune --older <duration> | browse]"
 disable-model-invocation: true
 allowed-tools: Bash
 ---
 
-# Session management
+# Chats in this project
 
-Script: `python3 ${CLAUDE_SKILL_DIR}/scripts/list_sessions.py "$PWD"`
+Run: `python3 "${CLAUDE_PLUGIN_ROOT}/cli/cc.py" sessions "${CLAUDE_PROJECT_DIR}" <command>`
 
-| Command | Flags |
-|---------|-------|
-| List sessions | *(none)* |
-| Delete session | `--delete <full-uuid>` |
-| Preview old sessions | `--prune <duration>` |
-| Delete old sessions | `--prune <duration> --confirm` |
-| Browse | open the **Project directory** path from list output |
+| Intent | `<command>` |
+|--------|-------------|
+| List chats | *(omit)* |
+| Delete a chat | `delete <uuid-prefix>` |
+| Prune old chats | `prune <duration>` — e.g. `2w`, `3d`, `6m`, `12h` |
+| Confirm prune | `prune <duration> --confirm` |
+| Open the project folder | `browse` |
 
-For `delete`, list first to identify the target UUID by fuzzy name or prefix match.
-Sessions marked ● are active and protected from deletion.
+To delete by description ("the one about auth"), list first, pick the chat,
+then pass its **UUID prefix** (the `xxxxxxxx` shown) to `delete`.
+Chats marked ● are active and protected from deletion.
+
+To manage *other* projects, or remove one entirely, use `/projects`.
