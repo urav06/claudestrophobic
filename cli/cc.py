@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claudestrophobic — manage Claude Code chats and projects from the terminal.
+"""claudestrophobic — manage Claude Code sessions and projects from the terminal.
 
   cc.py sessions <cwd> [delete <uuid-prefix> | prune <duration> [--confirm] | browse]
   cc.py projects <cwd> [nuke <name> [--confirm] | browse <name>]
@@ -16,36 +16,36 @@ import store
 
 
 # ---------------------------------------------------------------------------
-#  sessions — chats within the current project
+#  sessions — the current project's own sessions
 # ---------------------------------------------------------------------------
 
 def sessions_list(cwd: str) -> None:
-    chats = store.discover(cwd)
-    if not chats:
-        print("No chats in this project yet — roomy in here."); return
+    sessions = store.discover(cwd)
+    if not sessions:
+        print("No sessions in this project yet — roomy in here."); return
     active = store.active_ids()
     print(f"**Project:** `{store.project_dir(cwd)}`\n")
-    print("| # | Chat | UUID | Last active | Size |")
+    print("| # | Session | UUID | Last active | Size |")
     print("|---|------|------|-------------|------|")
-    for i, s in enumerate(chats, 1):
+    for i, s in enumerate(sessions, 1):
         dot = "● " if s.uuid in active else ""
         print(f"| {i} | {dot}{s.name} | `{s.uuid[:8]}` | {store.fmt_age(s.mtime)} | {store.fmt_size(s.size)} |")
-    print(f"\n**{len(chats)} chats** · {store.fmt_size(sum(s.size for s in chats))} total")
+    print(f"\n**{len(sessions)} sessions** · {store.fmt_size(sum(s.size for s in sessions))} total")
 
 
 def sessions_delete(cwd: str, selector: str) -> None:
     root = store.project_dir(cwd)
     hits = sorted(root.glob(f"{selector}*.jsonl")) if (root and selector) else []
     if not hits:
-        print(f"No chat matches `{selector}`. Run `/sessions` to see UUIDs."); return
+        print(f"No session matches `{selector}`. Run `/sessions` to see UUIDs."); return
     if len(hits) > 1:
-        print(f"`{selector}` matches {len(hits)} chats — narrow it down:")
+        print(f"`{selector}` matches {len(hits)} sessions — narrow it down:")
         for p in hits: print(f"  · `{p.stem[:8]}`")
         return
 
-    s = store.Session(hits[0], store.index_history().get(hits[0].stem, {}).get("prompt"))
+    s = store.Session(hits[0])
     if s.uuid in store.active_ids():
-        print(f"● `{s.uuid[:8]}` is the chat you're in — can't delete it from inside."); return
+        print(f"● `{s.uuid[:8]}` is the session you're in — can't delete it from inside."); return
     name = s.name
     _, freed = store.purge([s])
     print(f"Deleted **{name}** — freed {store.fmt_size(freed)}.")
@@ -59,19 +59,19 @@ def sessions_prune(cwd: str, duration: str, confirm: bool) -> None:
     active = store.active_ids()
     old    = [s for s in store.discover(cwd) if s.mtime < cutoff and s.uuid not in active]
     if not old:
-        print(f"No chats older than {duration}."); return
+        print(f"No sessions older than {duration}."); return
 
-    print(f"Chats older than {duration}:\n")
-    print("| # | Chat | UUID | Last active | Size |")
+    print(f"Sessions older than {duration}:\n")
+    print("| # | Session | UUID | Last active | Size |")
     print("|---|------|------|-------------|------|")
     for i, s in enumerate(old, 1):
         print(f"| {i} | {s.name} | `{s.uuid[:8]}` | {store.fmt_age(s.mtime)} | {store.fmt_size(s.size)} |")
 
     if not confirm:
-        print(f"\n**{len(old)} chats** · {store.fmt_size(sum(s.size for s in old))} reclaimable. "
+        print(f"\n**{len(old)} sessions** · {store.fmt_size(sum(s.size for s in old))} reclaimable. "
               f"Re-run with `--confirm` to prune."); return
     _, freed = store.purge(old)
-    print(f"\nPruned {len(old)} chats — freed {store.fmt_size(freed)}.")
+    print(f"\nPruned {len(old)} sessions — freed {store.fmt_size(freed)}.")
 
 
 def sessions_browse(cwd: str) -> None:
@@ -102,7 +102,7 @@ def projects_list(cwd: str) -> None:
     if not projects:
         print("No projects found."); return
     current = store.project_dir(cwd)
-    print("| # | Project | Chats | Last active | Size | State |")
+    print("| # | Project | Sessions | Last active | Size | State |")
     print("|---|---------|-------|-------------|------|-------|")
     for i, p in enumerate(projects, 1):
         here = "  ← you're here" if p.dir == current else ""
@@ -120,11 +120,11 @@ def projects_nuke(cwd: str, selector: str, confirm: bool) -> None:
     if p.dir == store.project_dir(cwd):
         print("Can't nuke the project you're standing in — run this from another folder."); return
     if {s.uuid for s in p.sessions} & store.active_ids():
-        print(f"**{p.name}** has an active chat — close it first."); return
+        print(f"**{p.name}** has an active session — close it first."); return
 
     if not confirm:
         print(f"**Nuke {p.name}?** This removes its entire Claude Code footprint:\n")
-        print(f"- {len(p.sessions)} chats")
+        print(f"- {len(p.sessions)} sessions")
         if p.memory: print(f"- memory ({store.fmt_size(p.memory)})")
         print("- history entries + the project directory\n")
         print(f"Everything goes to Trash · {store.fmt_size(p.size)} reclaimable. Re-run with `--confirm`.")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The store Claude Code keeps under ~/.claude — projects, chats, and their safe removal.
+"""The store Claude Code keeps under ~/.claude — projects, sessions, and their safe removal.
 
 Engine behind the /sessions and /projects skills. It never prints; callers own all
 I/O. Every deletion routes through `_remove` (Trash-first, refuses anything outside
@@ -40,23 +40,17 @@ def project_dir(cwd: str) -> Path | None:
     return None
 
 
-def index_history() -> dict:
-    """One pass over history.jsonl → {sessionId: {'prompt': first real prompt, 'cwd': project path}}."""
-    idx: dict = {}
-    if not HISTORY.exists(): return idx
+def history_cwd() -> dict:
+    """sessionId -> project cwd, from history.jsonl. A fallback for projects whose transcripts can't be read."""
+    out: dict = {}
+    if not HISTORY.exists(): return out
     with HISTORY.open() as f:
         for line in f:
             try: entry = json.loads(line)
             except json.JSONDecodeError: continue
-            sid = entry.get("sessionId")
-            if not sid: continue
-            rec = idx.setdefault(sid, {})
-            if "cwd" not in rec and entry.get("project"): rec["cwd"] = entry["project"]
-            display = entry.get("display", "")
-            if isinstance(display, dict): display = display.get("display", "")
-            if "prompt" not in rec and isinstance(display, str) and display and not display.startswith("/"):
-                rec["prompt"] = " ".join(display.split())[:80]
-    return idx
+            sid, project = entry.get("sessionId"), entry.get("project")
+            if sid and project: out.setdefault(sid, project)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -118,10 +112,23 @@ def rewrite_history(uuids: set = frozenset(), cwds: set = frozenset()) -> None:
 #  Entities
 # ---------------------------------------------------------------------------
 
+def _prompt_of(entry: dict) -> str | None:
+    """First-prompt for a transcript user line — the slash command or the text, skipping caveat/meta turns."""
+    message = entry.get("message")
+    content = message.get("content", "") if isinstance(message, dict) else ""
+    if isinstance(content, list):
+        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+    if not isinstance(content, str): return None
+    command = re.search(r"<command-name>([^<]+)</command-name>", content)
+    if command: return command.group(1).strip()
+    if "<local-command-caveat>" in content or "<command-message>" in content: return None
+    content = content.strip()
+    return " ".join(content.split())[:80] if content else None
+
+
 @dataclass
 class Session:
-    path        : Path
-    first_prompt: str | None = None
+    path: Path
 
     @property
     def uuid(self) -> str: return self.path.stem
@@ -139,15 +146,17 @@ class Session:
 
     @property
     def name(self) -> str:
-        # Display priority: customTitle (last /rename wins) > aiTitle (first) > first prompt > uuid[:8]
-        custom = ai = None
+        # Self-describing from the transcript, mirroring the native resume UI:
+        # customTitle (last /rename wins) > aiTitle (first) > first prompt > uuid[:8]
+        custom = ai = prompt = None
         with self.path.open() as f:
             for line in f:
                 try:
-                    if   '"custom-title"' in line: custom = json.loads(line).get("customTitle", custom)
-                    elif '"ai-title"'     in line: ai     = ai or json.loads(line).get("aiTitle")
+                    if   '"custom-title"' in line:                   custom = json.loads(line).get("customTitle", custom)
+                    elif '"ai-title"'     in line:                   ai     = ai or json.loads(line).get("aiTitle")
+                    elif prompt is None and '"type":"user"' in line: prompt = _prompt_of(json.loads(line))
                 except json.JSONDecodeError: continue
-        return custom or ai or self.first_prompt or self.uuid[:8]
+        return custom or ai or prompt or self.uuid[:8]
 
 
 @dataclass
@@ -180,12 +189,11 @@ class Project:
 #  Discovery
 # ---------------------------------------------------------------------------
 
-def _sessions_in(root: Path, idx: dict) -> list[Session]:
-    found = (Session(p, idx.get(p.stem, {}).get("prompt")) for p in root.glob("*.jsonl"))
-    return sorted(found, key=lambda s: s.mtime, reverse=True)
+def _sessions_in(root: Path) -> list[Session]:
+    return sorted((Session(p) for p in root.glob("*.jsonl")), key=lambda s: s.mtime, reverse=True)
 
 
-def _cwd_of(pdir: Path, history_cwd: dict) -> str | None:
+def _cwd_of(pdir: Path, hist: dict) -> str | None:
     """Canonical working dir for a project — read from a transcript, falling back to history."""
     for jf in pdir.glob("*.jsonl"):
         try:
@@ -195,25 +203,24 @@ def _cwd_of(pdir: Path, history_cwd: dict) -> str | None:
                     except json.JSONDecodeError: continue
                     if cwd: return cwd
         except OSError: pass
-        if jf.stem in history_cwd: return history_cwd[jf.stem]
+        if jf.stem in hist: return hist[jf.stem]
     return None
 
 
 def discover(cwd: str) -> list[Session]:
     root = project_dir(cwd)
-    return _sessions_in(root, index_history()) if root else []
+    return _sessions_in(root) if root else []
 
 
 def all_projects() -> list[Project]:
     if not PROJECTS.is_dir(): return []
-    idx     = index_history()
-    by_cwd  = {sid: rec["cwd"] for sid, rec in idx.items() if rec.get("cwd")}
-    found   = [Project(d, _cwd_of(d, by_cwd), _sessions_in(d, idx)) for d in PROJECTS.iterdir() if d.is_dir()]
+    hist  = history_cwd()
+    found = [Project(d, _cwd_of(d, hist), _sessions_in(d)) for d in PROJECTS.iterdir() if d.is_dir()]
     return sorted(found, key=lambda p: p.last_active, reverse=True)
 
 
 # ---------------------------------------------------------------------------
-#  Operations — delete a chat, prune a project, nuke a whole project
+#  Operations — delete a session, prune old sessions, nuke a whole project
 # ---------------------------------------------------------------------------
 
 def purge(sessions: list[Session]) -> tuple[list[Session], int]:
@@ -235,9 +242,9 @@ def purge(sessions: list[Session]) -> tuple[list[Session], int]:
 def nuke(project: Project) -> int:
     """Total removal of a project's entire footprint → Trash. Returns bytes freed.
 
-    Takes everything: chats, memory, subagent data, out-of-dir satellites, history
+    Takes everything: sessions, memory, subagent data, out-of-dir satellites, history
     rows, and the directory. Precondition (caller-enforced): not the current
-    project, no active chats.
+    project, no active sessions.
     """
     freed = _du(project.dir) + sum(_du(p) for s in project.sessions for p in _satellites(s.uuid))
     for s in project.sessions:
