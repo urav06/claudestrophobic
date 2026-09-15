@@ -35,7 +35,7 @@ def sessions_list(cwd: str) -> None:
 
 def sessions_delete(cwd: str, selector: str) -> None:
     root = store.project_dir(cwd)
-    hits = sorted(root.glob(f"{selector}*.jsonl")) if (root and selector) else []
+    hits = sorted(p for p in root.glob("*.jsonl") if p.stem.startswith(selector)) if (root and selector) else []
     if not hits:
         print(f"No session matches `{selector}`. Run `/sessions` to see UUIDs."); return
     if len(hits) > 1:
