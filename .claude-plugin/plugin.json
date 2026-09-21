@@ -1,7 +1,7 @@
 {
   "name":        "claudestrophobic",
-  "version":     "0.2.2",
-  "description": "Manage Claude Code sessions and projects — list, delete, and prune sessions; nuke whole projects",
+  "version":     "0.3.0",
+  "description": "Manage Claude Code sessions and projects: list, delete, and prune sessions; nuke whole projects",
   "author":      { "name": "urav" },
   "license":     "MIT",
   "keywords":    ["sessions", "projects", "management", "cleanup", "conversations"]

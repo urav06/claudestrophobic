@@ -1,0 +1,36 @@
+name: Unclaimed path
+description: claudestrophobic found files named after a session in a folder it doesn't know
+title: "Unclaimed path: "
+labels: ["unclaimed-path"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        You got here from the "Report this folder" link that `/sessions delete` printed. The link filled in
+        the fields below. Paths have your home folder and session ids removed. Press **Create** to send it.
+  - type: textarea
+    id: paths
+    attributes:
+      label: Paths that were not deleted
+      description: Relative to ~/.claude, one per line, with the kind and size of each.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: plugin
+    attributes:
+      label: claudestrophobic version
+  - type: input
+    id: claude
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`
+  - type: input
+    id: os
+    attributes:
+      label: OS
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Optional. If you know which Claude Code feature writes these files, say so.

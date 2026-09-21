@@ -3,12 +3,14 @@
 
 Engine behind the /sessions and /projects skills. It never prints; callers own all
 I/O. Every deletion routes through `_remove` (Trash-first, refuses anything outside
-~/.claude) and `rewrite_history` (atomic). Stdlib only, Python 3.9+.
+~/.claude) and `rewrite_history` (atomic); `nuke` then hands the config entry to
+`claude project purge`. Stdlib only, Python 3.9+.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import platform
 import re
 import shutil
@@ -21,6 +23,10 @@ from pathlib import Path
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS   = CLAUDE_DIR / "projects"
 HISTORY    = CLAUDE_DIR / "history.jsonl"
+
+UUID       = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+OFF_LIMITS = {"projects", "sessions", "telemetry"}  # swept per project · live locks · not ours to touch
+DISPOSABLE = {"file-history", "session-env", "debug", "tasks", "image-cache", "uploads"}  # per-session folders Claude Code's own age sweep deletes
 
 
 # ---------------------------------------------------------------------------
@@ -63,8 +69,40 @@ def _du(path: Path) -> int:
     except OSError: return 0
 
 
-def _satellites(uuid: str) -> list[Path]:
-    return [CLAUDE_DIR / "file-history" / uuid, CLAUDE_DIR / "session-env" / uuid]
+def _owner(name: str) -> str | None:
+    """The session a file name belongs to: `<uuid>` or `<uuid>.<suffix>`, and no second uuid anywhere in it."""
+    hit = UUID.match(name)
+    if not hit: return None
+    rest = name[hit.end():]
+    return hit[0] if (not rest or rest[0] == ".") and not UUID.search(rest) else None
+
+
+def strays(uuids: set) -> dict:
+    """uuid -> every path outside projects/ named after that session, found in one walk.
+
+    Finding by name keeps pace with Claude Code: a per-session folder it adds tomorrow
+    shows up here unasked. Finding is not deleting — see `disposable`.
+    """
+    found: dict = {u: [] for u in uuids}
+    if not CLAUDE_DIR.is_dir(): return found
+    for top in CLAUDE_DIR.iterdir():
+        if not top.is_dir() or top.is_symlink() or top.name in OFF_LIMITS: continue
+        for here, dirs, files in os.walk(top):
+            for name in dirs + files:
+                if _owner(name) in found: found[_owner(name)].append(Path(here, name))
+            deep    = len(Path(here).relative_to(top).parts) >= 2
+            dirs[:] = [] if deep else [d for d in dirs if not UUID.search(d)]  # a session's dir is wholly its own
+    return found
+
+
+def shape(path: Path) -> str:
+    """A path with everything personal taken out — `daemon/attach-journal/<uuid>.json` — safe to paste in public."""
+    return UUID.sub("<uuid>", path.relative_to(CLAUDE_DIR).as_posix())
+
+
+def disposable(path: Path) -> bool:
+    """Only strays in folders Claude Code itself sweeps by age are deleted; the rest are reported, never touched."""
+    return path.relative_to(CLAUDE_DIR).parts[0] in DISPOSABLE
 
 
 def _remove(path: Path) -> None:
@@ -105,6 +143,7 @@ def rewrite_history(uuids: set = frozenset(), cwds: set = frozenset()) -> None:
     kept = [ln for ln in HISTORY.read_text().splitlines() if ln.strip() and keep(ln)]
     tmp  = HISTORY.with_name(HISTORY.name + ".tmp")
     tmp.write_text("\n".join(kept) + "\n")
+    shutil.copymode(HISTORY, tmp)  # every prompt you've typed lives here; keep it as private as it was
     tmp.replace(HISTORY)  # atomic: a concurrent writer never sees a half-written file
 
 
@@ -140,9 +179,17 @@ class Session:
     def size(self) -> int: return self.path.stat().st_size
 
     @property
+    def local(self) -> list[Path]:
+        # transcript, its data dir, and any copy Claude Code set aside — all share the uuid as a name prefix
+        return sorted(p for p in self.path.parent.glob(f"{self.uuid}*") if _owner(p.name) == self.uuid)
+
+    @property
     def artifacts(self) -> list[Path]:
-        here = [self.path, self.path.parent / self.uuid]  # transcript + subagent dir
-        return [p for p in here + _satellites(self.uuid) if p.exists()]
+        return self.local + [p for p in strays({self.uuid})[self.uuid] if disposable(p)]
+
+    @property
+    def unclaimed(self) -> list[Path]:
+        return [p for p in strays({self.uuid})[self.uuid] if not disposable(p)]
 
     @property
     def name(self) -> str:
@@ -190,7 +237,8 @@ class Project:
 # ---------------------------------------------------------------------------
 
 def _sessions_in(root: Path) -> list[Session]:
-    return sorted((Session(p) for p in root.glob("*.jsonl")), key=lambda s: s.mtime, reverse=True)
+    live = (Session(p) for p in root.glob("*.jsonl") if UUID.fullmatch(p.stem))  # skips set-aside copies
+    return sorted(live, key=lambda s: s.mtime, reverse=True)
 
 
 def _cwd_of(pdir: Path, hist: dict) -> str | None:
@@ -226,32 +274,58 @@ def all_projects() -> list[Project]:
 def purge(sessions: list[Session]) -> tuple[list[Session], int]:
     """Remove every artifact of each non-active session, then one atomic history rewrite.
 
-    Returns (purged, bytes_freed). Active sessions are skipped — this is the one
-    place that invariant is enforced. Never touches a project's `memory/`.
+    Returns (purged, bytes_freed), counting only what is verifiably gone. Active
+    sessions are skipped — this is the one place that invariant is enforced. Never
+    touches a project's `memory/`.
     """
     doomed = [s for s in sessions if s.uuid not in active_ids()]
+    extra  = strays({s.uuid for s in doomed})
     freed  = 0
     for s in doomed:
-        for path in s.artifacts:
-            freed += _du(path)
+        for path in s.local + [p for p in extra[s.uuid] if disposable(p)]:
+            size = _du(path)
             _remove(path)
-    rewrite_history(uuids={s.uuid for s in doomed})
-    return doomed, freed
+            if not path.exists(): freed += size
+    purged = [s for s in doomed if not s.path.exists()]
+    rewrite_history(uuids={s.uuid for s in purged})
+    return purged, freed
 
 
-def nuke(project: Project) -> int:
-    """Total removal of a project's entire footprint → Trash. Returns bytes freed.
+def claude_version() -> tuple | None:
+    exe = shutil.which("claude")
+    if not exe: return None
+    try:    out = subprocess.run([exe, "--version"], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=20).stdout
+    except (OSError, subprocess.TimeoutExpired): return None
+    version = re.match(r"(\d+)\.(\d+)\.(\d+)", out.strip())
+    return tuple(map(int, version.groups())) if version else None
 
-    Takes everything: sessions, memory, subagent data, out-of-dir satellites, history
-    rows, and the directory. Precondition (caller-enforced): not the current
-    project, no active sessions.
+
+def native_purge() -> list | None:
+    """The `claude project purge` command line, if this Claude Code has it (2.1.126+)."""
+    return [shutil.which("claude"), "project", "purge", "--yes"] if (claude_version() or ()) >= (2, 1, 126) else None
+
+
+def nuke(project: Project) -> tuple[int, bool]:
+    """Total removal of a project's entire footprint. Returns (bytes_freed, native_ran).
+
+    Everything on disk goes to Trash first: sessions, memory, subagent data, strays,
+    the directory, plus the history rows. Then `claude project purge` clears what only
+    Claude Code can reach — the project's entry in ~/.claude.json — so nuke stays a
+    superset of it. Precondition (caller-enforced): not the current project, no
+    active sessions.
     """
-    freed = _du(project.dir) + sum(_du(p) for s in project.sessions for p in _satellites(s.uuid))
-    for s in project.sessions:
-        for path in _satellites(s.uuid): _remove(path)
+    extra = [p for paths in strays({s.uuid for s in project.sessions}).values() for p in paths if disposable(p)]
+    freed = _du(project.dir) + sum(_du(p) for p in extra)
+    for path in extra: _remove(path)
     _remove(project.dir)
     rewrite_history(uuids={s.uuid for s in project.sessions}, cwds={project.cwd} if project.cwd else frozenset())
-    return freed
+
+    purge_cmd = native_purge() if project.cwd else None
+    if not purge_cmd: return freed, False
+    try:    done = subprocess.run(purge_cmd + [project.cwd], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.TimeoutExpired): return freed, False
+    # purge exits 1 when the Trash pass above left it nothing to clear; that is a clean finish, not a failure
+    return freed, done.returncode == 0 or "No Claude Code project state" in done.stderr
 
 
 # ---------------------------------------------------------------------------

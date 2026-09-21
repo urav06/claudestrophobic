@@ -18,11 +18,11 @@
 
 ---
 
-Claude Code has no built-in way to see, name, or delete your past sessions. They accumulate forever. **claudestrophobic** gives you the controls: list and delete sessions, prune the old ones, and clear out whole projects you've finished, all from the terminal. It ships as skills instead of MCP tools, so it costs **zero tokens** of context until you call it.
+Claude Code lets you resume and rename past sessions, but not delete one. **claudestrophobic** adds that: delete a session, prune old ones, and find and remove the projects you have finished, all from the terminal. It ships as skills instead of MCP tools, so it costs **zero tokens** of context until you call it.
 
 ## Why
 
-On claude.ai, every conversation sits in a sidebar. Named. Browsable. Deletable. Claude Code keeps the very same conversations as opaque UUID files under `~/.claude/projects/`, with nothing built in to manage them. The [request to fix that](https://github.com/anthropics/claude-code/issues/13514) has been open for over ten months, unanswered.
+On claude.ai you can delete a conversation from the sidebar. Claude Code keeps the same conversations as UUID-named files under `~/.claude/projects/`, and the only built-in removal is a sweep that deletes everything older than 30 days.
 
 This is that sidebar, brought to your terminal.
 
@@ -41,6 +41,7 @@ This is that sidebar, brought to your terminal.
 /sessions                             # list this project's sessions
 /sessions delete the one about auth   # delete by description; the model finds the match
 /sessions delete 064ddd26             # or by UUID prefix
+/sessions delete 064ddd26 --preview   # show what a delete would remove
 /sessions prune --older 2w            # drop everything older than two weeks
 /sessions browse                      # open the project's folder
 ```
@@ -56,8 +57,8 @@ This is that sidebar, brought to your terminal.
 ## How it works
 
 - **Names** come from each session's own transcript, the same chain Claude Code's resume picker uses: your `/rename` title, then the auto-generated one, then the first prompt.
-- **Deletion** clears a session's whole footprint: transcript, subagent data, file history, session environment, and its rows in `history.jsonl`.
+- **Deletion** finds a session's files by name, anywhere under `~/.claude`, then removes only the ones in folders Claude Code itself treats as disposable: the transcript, subagent data, file history, session environment, debug log, and its rows in `history.jsonl`. Anything it finds elsewhere is left alone and printed with a pre-filled link to report it.
 - **Projects** are keyed by their real working directory, read from the transcript rather than the lossy encoded folder name. That is how it finds sessions stranded when you delete a project folder, which Claude Code never cleans up on its own.
-- **`nuke`** retires a finished project in one move: every session, its memory, its history, the directory. It refuses the project you are in and any with a live session.
+- **`nuke`** removes a finished project: every session, its memory, its history, the directory, all to the Trash. It then runs Claude Code's own `claude project purge` to clear the project's entry in `~/.claude.json`, so it covers everything purge does and keeps the files recoverable. It refuses the project you are in and any with a live session.
 - **Safety** is the default. Active sessions are read from lock files and left untouched. History rewrites are atomic, so a session running alongside never sees a half-written file. Everything removed goes to the system Trash where one exists, with `rm` as the fallback. macOS and Linux.
 - **Zero tokens.** Skills load only when you call them. An MCP server with these features would crowd every prompt you send; this stays out of your context until you ask. The whole thing is a few hundred lines of dependency-free Python.

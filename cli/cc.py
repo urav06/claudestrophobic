@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""claudestrophobic — manage Claude Code sessions and projects from the terminal.
+"""claudestrophobic: manage Claude Code sessions and projects from the terminal.
 
-  cc.py sessions <cwd> [delete <uuid-prefix> | prune <duration> [--confirm] | browse]
+  cc.py sessions <cwd> [delete <uuid-prefix> [--preview] | prune <duration> [--confirm] | browse]
   cc.py projects <cwd> [nuke <name> [--confirm] | browse <name>]
 
 `store` sits beside this file, so a bare import resolves with no path setup.
@@ -9,10 +9,18 @@
 
 from __future__ import annotations
 
+import json
+import platform
 import sys
 import time
+from pathlib import Path
+from urllib.parse import urlencode
 
 import store
+
+
+ISSUES  = "https://github.com/urav06/claudestrophobic/issues"
+OPTIONS = {"--confirm", "--preview", "--dry-run", "--older"}  # --older is decoration: `prune --older 2w`
 
 
 # ---------------------------------------------------------------------------
@@ -22,7 +30,7 @@ import store
 def sessions_list(cwd: str) -> None:
     sessions = store.discover(cwd)
     if not sessions:
-        print("No sessions in this project yet — roomy in here."); return
+        print("No sessions in this project yet. Roomy in here."); return
     active = store.active_ids()
     print(f"**Project:** `{store.project_dir(cwd)}`\n")
     print("| # | Session | UUID | Last active | Size |")
@@ -33,22 +41,58 @@ def sessions_list(cwd: str) -> None:
     print(f"\n**{len(sessions)} sessions** · {store.fmt_size(sum(s.size for s in sessions))} total")
 
 
-def sessions_delete(cwd: str, selector: str) -> None:
-    root = store.project_dir(cwd)
-    hits = sorted(p for p in root.glob("*.jsonl") if p.stem.startswith(selector)) if (root and selector) else []
+def sessions_delete(cwd: str, selector: str, dry_run: bool) -> None:
+    hits = [s for s in store.discover(cwd) if selector and s.uuid.startswith(selector)]
     if not hits:
         print(f"No session matches `{selector}`. Run `/sessions` to see UUIDs."); return
     if len(hits) > 1:
-        print(f"`{selector}` matches {len(hits)} sessions — narrow it down:")
-        for p in hits: print(f"  · `{p.stem[:8]}`")
+        print(f"`{selector}` matches {len(hits)} sessions. Narrow it down:\n")
+        for s in hits: print(f"- `{s.uuid[:8]}` {s.name}")
         return
 
-    s = store.Session(hits[0])
+    s = hits[0]
     if s.uuid in store.active_ids():
-        print(f"● `{s.uuid[:8]}` is the session you're in — can't delete it from inside."); return
+        print(f"● `{s.uuid[:8]}` is the session you're in, so it can't be deleted from here."); return
     name = s.name
-    _, freed = store.purge([s])
-    print(f"Deleted **{name}** — freed {store.fmt_size(freed)}.")
+    if dry_run:
+        print(f"Deleting **{name}** would remove:\n")
+        for path in s.artifacts: print(f"- `~/.claude/{path.relative_to(store.CLAUDE_DIR)}` ({store.fmt_size(store._du(path))})")
+        print("- its rows in `history.jsonl`")
+        _report_unclaimed(s.unclaimed)
+        print("\nThis was a preview. Nothing was deleted."); return
+    unclaimed = s.unclaimed
+    purged, freed = store.purge([s])
+    if not purged:
+        print(f"Couldn't delete **{name}**. Its transcript is still on disk."); return
+    print(f"Deleted **{name}**. Freed {store.fmt_size(freed)}.")
+    _report_unclaimed(unclaimed)
+
+
+def _report_unclaimed(paths: list) -> None:
+    """Files named after the session in folders this tool doesn't know. Left alone, and worth a bug report.
+
+    The link's query keys are the field ids in .github/ISSUE_TEMPLATE/unclaimed-path.yml; rename them together.
+    """
+    if not paths: return
+    found   = sorted({f"{store.shape(p)}  ({'folder' if p.is_dir() else 'file'}, {store.fmt_size(store._du(p))})" for p in paths})
+    folders = sorted({str(Path(store.shape(p)).parent) for p in paths})
+    version = ".".join(map(str, store.claude_version() or ())) or "unknown"
+    report  = ISSUES + "/new?" + urlencode({
+        "template": "unclaimed-path.yml",
+        "title":    "Unclaimed path: " + ", ".join(folders),
+        "paths":    "\n".join(found),
+        "plugin":   _plugin_version(),
+        "claude":   version,
+        "os":       f"{platform.system()} {platform.release()}",
+    })
+    print("\nNot deleted. These are named after this session, but claudestrophobic doesn't know the folder:\n")
+    for line in found: print(f"- `~/.claude/{line.split('  (')[0]}`")
+    print(f"\n[Report this folder]({report}) so a later version can handle it.")
+
+
+def _plugin_version() -> str:
+    try:    return json.loads((Path(__file__).parent.parent / ".claude-plugin" / "plugin.json").read_text())["version"]
+    except (OSError, KeyError, json.JSONDecodeError): return "unknown"
 
 
 def sessions_prune(cwd: str, duration: str, confirm: bool) -> None:
@@ -70,8 +114,8 @@ def sessions_prune(cwd: str, duration: str, confirm: bool) -> None:
     if not confirm:
         print(f"\n**{len(old)} sessions** · {store.fmt_size(sum(s.size for s in old))} reclaimable. "
               f"Re-run with `--confirm` to prune."); return
-    _, freed = store.purge(old)
-    print(f"\nPruned {len(old)} sessions — freed {store.fmt_size(freed)}.")
+    purged, freed = store.purge(old)
+    print(f"\nPruned {len(purged)} of {len(old)} sessions. Freed {store.fmt_size(freed)}.")
 
 
 def sessions_browse(cwd: str) -> None:
@@ -92,8 +136,8 @@ def _one_project(selector: str) -> store.Project | None:
     if not hits:
         print(f"No project matches `{selector}`.")
     else:
-        print(f"`{selector}` matches {len(hits)} projects — narrow it down:")
-        for p in hits: print(f"  · {p.name}")
+        print(f"`{selector}` matches {len(hits)} projects. Narrow it down:\n")
+        for p in hits: print(f"- {p.name}")
     return None
 
 
@@ -105,32 +149,37 @@ def projects_list(cwd: str) -> None:
     print("| # | Project | Sessions | Last active | Size | State |")
     print("|---|---------|-------|-------------|------|-------|")
     for i, p in enumerate(projects, 1):
-        here = "  ← you're here" if p.dir == current else ""
+        here = " (you're here)" if p.dir == current else ""
         print(f"| {i} | {p.name}{here} | {len(p.sessions)} | {store.fmt_age(p.last_active)} | "
               f"{store.fmt_size(p.size)} | {p.state} |")
     stale = [p for p in projects if not p.live]
     if stale:
-        print(f"\n**{len(stale)} projects** orphaned or empty · {store.fmt_size(sum(p.size for p in stale))} "
-              f"reclaimable · nuke one with `/projects nuke <name>`")
+        print(f"\n**{len(stale)} projects** orphaned or empty, {store.fmt_size(sum(p.size for p in stale))} "
+              f"reclaimable. Nuke one with `/projects nuke <name>`.")
 
 
 def projects_nuke(cwd: str, selector: str, confirm: bool) -> None:
     p = _one_project(selector)
     if p is None: return
     if p.dir == store.project_dir(cwd):
-        print("Can't nuke the project you're standing in — run this from another folder."); return
+        print("Can't nuke the project you're standing in. Run this from another folder."); return
     if {s.uuid for s in p.sessions} & store.active_ids():
-        print(f"**{p.name}** has an active session — close it first."); return
+        print(f"**{p.name}** has an active session. Close it first."); return
 
     if not confirm:
         print(f"**Nuke {p.name}?** This removes its entire Claude Code footprint:\n")
         print(f"- {len(p.sessions)} sessions")
         if p.memory: print(f"- memory ({store.fmt_size(p.memory)})")
-        print("- history entries + the project directory\n")
-        print(f"Everything goes to Trash · {store.fmt_size(p.size)} reclaimable. Re-run with `--confirm`.")
+        print("- its history entries and the project directory")
+        if p.cwd and store.native_purge():
+            print("- its entry in `~/.claude.json` (trust, MCP servers). `claude project purge` removes that one permanently.")
+        print(f"\nFiles go to the Trash. {store.fmt_size(p.size)} reclaimable. Re-run with `--confirm`.")
         return
-    freed = store.nuke(p)
-    print(f"Nuked **{p.name}** → Trash. Freed {store.fmt_size(freed)}. Breathe easier.")
+    freed, native = store.nuke(p)
+    print(f"Nuked **{p.name}**. Freed {store.fmt_size(freed)}. Breathe easier.")
+    if p.cwd and not native:
+        print(f"\nCouldn't run `claude project purge`, so its entry in `~/.claude.json` may still be there. "
+              f"To check: `claude project purge --dry-run {p.cwd}`")
 
 
 def projects_browse(cwd: str, selector: str) -> None:
@@ -148,10 +197,14 @@ def main(argv: list) -> None:
     noun, cwd, rest = argv[0], argv[1], argv[2:]
     verb    = rest[0] if rest else ""
     confirm = "--confirm" in rest
+    dry_run = "--preview" in rest or "--dry-run" in rest
+    unknown = [a for a in rest if a.startswith("-") and a not in OPTIONS]
+    if unknown:  # a misspelt --preview must never fall through to a real delete
+        print(f"Unknown option `{unknown[0]}`. Nothing was done.\n{__doc__}"); return
     arg     = next((a for a in rest[1:] if not a.startswith("-")), "")
 
     if noun == "sessions":
-        if   verb == "delete": sessions_delete(cwd, arg)
+        if   verb == "delete": sessions_delete(cwd, arg, dry_run)
         elif verb == "prune":  sessions_prune(cwd, arg, confirm)
         elif verb == "browse": sessions_browse(cwd)
         else:                  sessions_list(cwd)
