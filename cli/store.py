@@ -54,15 +54,21 @@ def known_cwds() -> dict:
     them and leaves `memory/` behind. history.jsonl and ~/.claude.json outlive that sweep.
     """
     paths: set = set()
-    if HISTORY.exists():
+    try:
         with HISTORY.open() as f:
             for line in f:
                 try: project = json.loads(line).get("project")
                 except json.JSONDecodeError: continue
                 if project: paths.add(project)
+    except FileNotFoundError: pass
+    except OSError: UNREADABLE.append(HISTORY)
     try:    paths |= set(json.loads(CONFIG.read_text()).get("projects", {}))
-    except (OSError, json.JSONDecodeError, AttributeError): pass
+    except (FileNotFoundError, json.JSONDecodeError, AttributeError): pass
+    except OSError: UNREADABLE.append(CONFIG)
     return {encode(p): p for p in paths}
+
+
+UNREADABLE: list = []  # sources a permission (usually a sandbox) kept us from reading this run
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +117,15 @@ def disposable(path: Path) -> bool:
     return path.relative_to(CLAUDE_DIR).parts[0] in DISPOSABLE
 
 
+FAILED: list = []  # paths a removal could not delete this run, with the OS's reason
+
+
 def _remove(path: Path) -> None:
-    """Trash where available, rm as fallback. Refuses anything not strictly under ~/.claude/."""
+    """Trash where available, rm as fallback. Refuses anything not strictly under ~/.claude/.
+
+    Never raises: a path the OS won't let go of (a sandbox, a permission) lands in
+    FAILED so the caller can report it and carry on with the rest of the batch.
+    """
     if not path.exists(): return
     if CLAUDE_DIR.resolve() not in path.resolve().parents: return
 
@@ -124,7 +137,8 @@ def _remove(path: Path) -> None:
     try:
         if trash and subprocess.run(trash, capture_output=True).returncode == 0: return
     except OSError: pass  # trash tool absent → fall through to rm
-    shutil.rmtree(path) if path.is_dir() else path.unlink()
+    try:    shutil.rmtree(path) if path.is_dir() else path.unlink()
+    except OSError as e: FAILED.append((path, e.strerror or str(e)))
 
 
 def active_ids() -> set:

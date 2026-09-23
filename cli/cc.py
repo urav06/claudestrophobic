@@ -62,9 +62,17 @@ def sessions_delete(cwd: str, selector: str, dry_run: bool) -> None:
     unclaimed = s.unclaimed
     purged, freed = store.purge([s])
     if not purged:
-        print(f"Couldn't delete **{name}**. Its transcript is still on disk."); return
+        print(f"Couldn't delete **{name}**. Its transcript is still on disk."); _report_failed(); return
     print(f"Deleted **{name}**. Freed {store.fmt_size(freed)}.")
+    _report_failed()
     _report_unclaimed(unclaimed)
+
+
+def _report_failed() -> None:
+    if not store.FAILED: return
+    print("\nThe OS refused to remove these, so they are still on disk:\n")
+    for path, why in store.FAILED: print(f"- `{path}`: {why}")
+    print("\nA sandboxed Claude Code session can't write under `~/.claude`. Run this from a session without the sandbox.")
 
 
 def _report_unclaimed(paths: list) -> None:
@@ -141,6 +149,14 @@ def projects_list(cwd: str) -> None:
               f"{store.fmt_size(sum(p.size for p in orphaned))}. `/projects delete orphaned` removes them all.")
     if dormant:
         print(f"\n**{len(dormant)} dormant**: no sessions left, but their memory loads the next time Claude runs there.")
+    _report_unreadable()
+
+
+def _report_unreadable() -> None:
+    if not store.UNREADABLE: return
+    names = ", ".join(f"`{p}`" for p in store.UNREADABLE)
+    print(f"\nCouldn't read {names}, so some paths above are folder names and some states may be wrong. "
+          "A sandboxed Claude Code session blocks those files; run this from one without the sandbox.")
 
 
 def _targets(cwd: str, selector: str) -> list:
@@ -153,9 +169,28 @@ def _targets(cwd: str, selector: str) -> list:
     return [p] if p else []
 
 
+PREVIEW = store.CLAUDE_DIR / ".claudestrophobic-preview.json"
+
+
+def _remember(selector: str, targets: list) -> None:
+    """Pin the previewed set, so `--confirm` deletes those projects and nothing that changed since."""
+    try: PREVIEW.write_text(json.dumps({"selector": selector, "dirs": sorted(str(p.dir) for p in targets)}))
+    except OSError: pass
+
+
+def _previewed(selector: str, targets: list) -> bool:
+    try:    pinned = json.loads(PREVIEW.read_text())
+    except (OSError, json.JSONDecodeError): return False
+    return pinned.get("selector") == selector and pinned.get("dirs") == sorted(str(p.dir) for p in targets)
+
+
 def projects_delete(cwd: str, selector: str, confirm: bool) -> None:
     targets = _targets(cwd, selector)
     if not targets: return
+    if confirm and not _previewed(selector, targets):
+        print("The set of projects has changed since the preview, or there was no preview. Nothing was deleted. "
+              "Here is the current preview:\n")
+        confirm = False
     here, active = store.project_dir(cwd), store.active_ids()
     for p in targets:
         if p.dir == here:
@@ -172,8 +207,10 @@ def projects_delete(cwd: str, selector: str, confirm: bool) -> None:
         if store.native_purge() and any(p.cwd for p in targets):
             print("\n`claude project purge` then removes the entry in `~/.claude.json` (trust, MCP servers), permanently.")
         print(f"\nFiles go to the Trash. {store.fmt_size(sum(p.size for p in targets))} reclaimable. Re-run with `--confirm`.")
+        _remember(selector, targets)
         return
 
+    PREVIEW.unlink(missing_ok=True)
     freed, unpurged = 0, []
     for p in targets:
         got, native = store.delete_project(p)
@@ -181,6 +218,7 @@ def projects_delete(cwd: str, selector: str, confirm: bool) -> None:
         if p.cwd and not native: unpurged.append(p.cwd)
     what = targets[0].name if len(targets) == 1 else f"{len(targets)} projects"
     print(f"Deleted **{what}**. Freed {store.fmt_size(freed)}. Breathe easier.")
+    _report_failed()
     for cwd_ in unpurged:
         print(f"\nCouldn't run `claude project purge`, so the entry for `{cwd_}` in `~/.claude.json` may still be there. "
               f"To check: `claude project purge --dry-run {cwd_}`")

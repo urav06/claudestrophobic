@@ -1,6 +1,6 @@
 {
   "name":        "claudestrophobic",
-  "version":     "0.4.0",
+  "version":     "0.4.1",
   "description": "Manage Claude Code sessions and projects: list and delete sessions; find and delete orphaned projects",
   "author":      { "name": "urav" },
   "license":     "MIT",
