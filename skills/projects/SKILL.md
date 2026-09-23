@@ -1,7 +1,7 @@
 ---
 name: projects
-description: List all Claude Code projects and nuke ones you're finished with
-argument-hint: "[list | nuke <name> [--confirm] | browse <name>]"
+description: List every Claude Code project; delete the orphaned ones
+argument-hint: "[list | delete <name|orphaned|dormant> | browse <name>]"
 disable-model-invocation: true
 allowed-tools:
   - 'Bash(python3 "${CLAUDE_PLUGIN_ROOT}/cli/cc.py" projects *)'
@@ -19,16 +19,23 @@ already Markdown.
 | Intent | `<command>` |
 |--------|-------------|
 | List every project | *(omit)* |
-| Preview a nuke | `nuke <name>` |
-| Confirm a nuke | `nuke <name> --confirm` |
+| Preview a delete | `delete <name>` |
+| Confirm a delete | `delete <name> --confirm` |
 | Open a project's folder | `browse <name>` |
 
 The user's words are intent, not syntax: map them onto this table.
 
-Resolve the user's phrase to exactly one project from the list, then pass a
-distinguishing substring (usually the folder name) as `<name>`. If several
-projects fit, show them and ask which. Projects shown as **orphaned** (the
-folder is gone) or **empty** are the usual nuke targets.
+`<name>` is a project exactly as listed, or its trailing path components
+(`kit-ctf`, `code/kit-ctf`). If several projects fit, show them and ask which.
 
-`nuke <name>` is a preview of everything it would remove. Relay it and end your
-turn. Run the `--confirm` form only after the user approves that preview.
+`<name>` can also be a state, which selects every project in it:
+
+- **orphaned**: its folder is gone, so nothing Claude Code kept for it is used
+  again. These are the usual delete targets.
+- **dormant**: its folder exists but no sessions do. Its memory still loads the
+  next time Claude runs there, so delete one only when the user names it or
+  asks for dormant projects by that word.
+
+`delete` without `--confirm` is a preview of everything it would remove. Relay
+it and end your turn. Run the `--confirm` form only after the user approves that
+preview.

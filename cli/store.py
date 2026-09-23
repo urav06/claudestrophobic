@@ -3,7 +3,7 @@
 
 Engine behind the /sessions and /projects skills. It never prints; callers own all
 I/O. Every deletion routes through `_remove` (Trash-first, refuses anything outside
-~/.claude) and `rewrite_history` (atomic); `nuke` then hands the config entry to
+~/.claude) and `rewrite_history` (atomic); `delete_project` then hands the config entry to
 `claude project purge`. Stdlib only, Python 3.9+.
 """
 
@@ -23,6 +23,7 @@ from pathlib import Path
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS   = CLAUDE_DIR / "projects"
 HISTORY    = CLAUDE_DIR / "history.jsonl"
+CONFIG     = Path.home() / ".claude.json"
 
 UUID       = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 OFF_LIMITS = {"projects", "sessions", "telemetry"}  # swept per project · live locks · not ours to touch
@@ -46,17 +47,22 @@ def project_dir(cwd: str) -> Path | None:
     return None
 
 
-def history_cwd() -> dict:
-    """sessionId -> project cwd, from history.jsonl. A fallback for projects whose transcripts can't be read."""
-    out: dict = {}
-    if not HISTORY.exists(): return out
-    with HISTORY.open() as f:
-        for line in f:
-            try: entry = json.loads(line)
-            except json.JSONDecodeError: continue
-            sid, project = entry.get("sessionId"), entry.get("project")
-            if sid and project: out.setdefault(sid, project)
-    return out
+def known_cwds() -> dict:
+    """encoded folder name -> real cwd, from every path Claude Code has recorded elsewhere.
+
+    Transcripts are the first source of a project's path, but the 30-day sweep deletes
+    them and leaves `memory/` behind. history.jsonl and ~/.claude.json outlive that sweep.
+    """
+    paths: set = set()
+    if HISTORY.exists():
+        with HISTORY.open() as f:
+            for line in f:
+                try: project = json.loads(line).get("project")
+                except json.JSONDecodeError: continue
+                if project: paths.add(project)
+    try:    paths |= set(json.loads(CONFIG.read_text()).get("projects", {}))
+    except (OSError, json.JSONDecodeError, AttributeError): pass
+    return {encode(p): p for p in paths}
 
 
 # ---------------------------------------------------------------------------
@@ -216,16 +222,18 @@ class Project:
     def name(self) -> str: return self.cwd or self.dir.name
 
     @property
-    def live(self) -> bool: return self.cwd is not None and Path(self.cwd).is_dir()
-
-    @property
     def size(self) -> int: return _du(self.dir)
 
     @property
     def memory(self) -> int: return _du(self.dir / "memory")
 
     @property
-    def state(self) -> str: return "live" if self.live else "orphaned" if self.sessions else "empty"
+    def state(self) -> str:
+        """`orphaned`: its working directory is gone, so nothing here can be used again.
+        `dormant`: the directory exists but no sessions do (swept by age, or deleted); its
+        memory still loads next time Claude runs there. Blank: in use."""
+        if self.cwd and not Path(self.cwd).is_dir(): return "orphaned"
+        return "" if self.sessions else "dormant"
 
     @property
     def last_active(self) -> float:
@@ -241,8 +249,8 @@ def _sessions_in(root: Path) -> list[Session]:
     return sorted(live, key=lambda s: s.mtime, reverse=True)
 
 
-def _cwd_of(pdir: Path, hist: dict) -> str | None:
-    """Canonical working dir for a project — read from a transcript, falling back to history."""
+def _cwd_of(pdir: Path, known: dict) -> str | None:
+    """Canonical working dir for a project: from a transcript, else from wherever else Claude Code wrote it."""
     for jf in pdir.glob("*.jsonl"):
         try:
             with jf.open() as f:
@@ -251,8 +259,7 @@ def _cwd_of(pdir: Path, hist: dict) -> str | None:
                     except json.JSONDecodeError: continue
                     if cwd: return cwd
         except OSError: pass
-        if jf.stem in hist: return hist[jf.stem]
-    return None
+    return known.get(pdir.name)
 
 
 def discover(cwd: str) -> list[Session]:
@@ -262,13 +269,13 @@ def discover(cwd: str) -> list[Session]:
 
 def all_projects() -> list[Project]:
     if not PROJECTS.is_dir(): return []
-    hist  = history_cwd()
-    found = [Project(d, _cwd_of(d, hist), _sessions_in(d)) for d in PROJECTS.iterdir() if d.is_dir()]
+    known = known_cwds()
+    found = [Project(d, _cwd_of(d, known), _sessions_in(d)) for d in PROJECTS.iterdir() if d.is_dir()]
     return sorted(found, key=lambda p: p.last_active, reverse=True)
 
 
 # ---------------------------------------------------------------------------
-#  Operations — delete a session, prune old sessions, nuke a whole project
+#  Operations: delete sessions, delete a whole project
 # ---------------------------------------------------------------------------
 
 def purge(sessions: list[Session]) -> tuple[list[Session], int]:
@@ -305,12 +312,12 @@ def native_purge() -> list | None:
     return [shutil.which("claude"), "project", "purge", "--yes"] if (claude_version() or ()) >= (2, 1, 126) else None
 
 
-def nuke(project: Project) -> tuple[int, bool]:
+def delete_project(project: Project) -> tuple[int, bool]:
     """Total removal of a project's entire footprint. Returns (bytes_freed, native_ran).
 
     Everything on disk goes to Trash first: sessions, memory, subagent data, strays,
     the directory, plus the history rows. Then `claude project purge` clears what only
-    Claude Code can reach — the project's entry in ~/.claude.json — so nuke stays a
+    Claude Code can reach, the project's entry in ~/.claude.json, so this stays a
     superset of it. Precondition (caller-enforced): not the current project, no
     active sessions.
     """
@@ -344,12 +351,6 @@ def fmt_age(ts: float) -> str:
     for span, unit in ((31536000, "y"), (2592000, "mo"), (604800, "w"), (86400, "d"), (3600, "h"), (60, "m")):
         if secs >= span: return f"{int(secs // span)}{unit} ago"
     return "just now"
-
-
-def parse_age(s: str) -> int | None:
-    units = {"h": 3600, "d": 86400, "w": 604800, "m": 2592000}
-    match = re.fullmatch(r"(\d+)([hdwm])", s.strip().lower())
-    return int(match[1]) * units[match[2]] if match else None
 
 
 def reveal(path: Path) -> None:

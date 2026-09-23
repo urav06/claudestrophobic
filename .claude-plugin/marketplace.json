@@ -7,7 +7,7 @@
     {
       "name": "claudestrophobic",
       "source": "./",
-      "description": "Session & project management for Claude Code - delete or prune sessions, nuke whole projects"
+      "description": "Session and project management for Claude Code: delete sessions, find and delete orphaned projects"
     }
   ]
 }
